@@ -9,6 +9,7 @@ import {
 } from '@angular/core';
 
 import * as Cesium from 'cesium';
+import { Cesium3DRadarCoverage } from './CesiumRadarCoverage';
 import { CesiumPlacement } from './CesiumPlacement';
 import { CesiumEntityRenderer } from "./CesiumEntityRenderer";
 import { CesiumHover } from "./CesiumHover";
@@ -120,7 +121,7 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
   protected readonly TeamFilter = TeamFilter;
 
   private readonly entityRepository = inject(EntityRepository);
-  private readonly editorState = inject(EditorState);
+  protected readonly editorState = inject(EditorState);
 
   private animationFrame?: number;
 
@@ -401,6 +402,80 @@ await BuildingLayer.load(this.viewer);
     }
 
     return inside;
+}
+protected readonly radarZoneNames = Cesium3DRadarCoverage.DEFAULT_3D_ZONES.map(z => z.name);
+
+private getRadarProps(): Record<string, any> {
+    return (this.editorState.selectedEntity()?.definition?.properties as any) ?? {};
+}
+
+protected getRadarProp<T>(key: string, fallback: T): T {
+    return this.getRadarProps()[key] ?? fallback;
+}
+
+protected getZoneVisible(zone: string): boolean {
+    return (this.getRadarProps()['zoneVisibility']?.[zone]) ?? true;
+}
+
+protected getZoneRange(zone: string): number | null {
+    return this.getRadarProps()['zoneRanges']?.[zone] ?? null;
+}
+
+protected getZoneMinElevation(zone: string): number | null {
+    return this.getRadarProps()['zoneElevations']?.[zone]?.min ?? null;
+}
+
+protected getZoneMaxElevation(zone: string): number | null {
+    return this.getRadarProps()['zoneElevations']?.[zone]?.max ?? null;
+}
+
+onSectorStartChange(value: string): void {
+    this.updateRadarProperty({ sectorStartDeg: +value });
+}
+
+onSectorSweepChange(value: string): void {
+    this.updateRadarProperty({ sectorSweepDeg: +value });
+}
+
+onElevationChange(value: string): void {
+    this.updateRadarProperty({ antennaMastHeight: +value });
+}
+
+onZoneVisibilityChange(zone: string, checked: boolean): void {
+    const current = this.getRadarProp<Record<string, boolean>>('zoneVisibility', {});
+    this.updateRadarProperty({ zoneVisibility: { ...current, [zone]: checked } });
+}
+
+onZoneRangeChange(zone: string, value: string): void {
+    const current = this.getRadarProp<Record<string, number>>('zoneRanges', {});
+    this.updateRadarProperty({ zoneRanges: { ...current, [zone]: +value } });
+}
+
+onZoneMinElevationChange(zone: string, value: string): void {
+    const current = this.getRadarProp<Record<string, { min: number; max: number }>>('zoneElevations', {});
+    this.updateRadarProperty({
+        zoneElevations: { ...current, [zone]: { ...current[zone], min: +value } }
+    });
+}
+
+onZoneMaxElevationChange(zone: string, value: string): void {
+    const current = this.getRadarProp<Record<string, { min: number; max: number }>>('zoneElevations', {});
+    this.updateRadarProperty({
+        zoneElevations: { ...current, [zone]: { ...current[zone], max: +value } }
+    });
+}
+updateRadarProperty(patch: Record<string, unknown>): void {
+    const entity = this.editorState.selectedEntity();
+    if (!entity || entity.definition.entityType !== 'RadarSite') return;
+
+    const updatedProperties = { ...entity.definition.properties, ...patch };
+    const updatedEntity = {
+        ...entity,
+        definition: { ...entity.definition, properties: updatedProperties }
+    };
+
+    this.entityRepository.update(entity.id, { definition: updatedEntity.definition });
+    this.editorState.selectedEntity.set(updatedEntity);
 }
 
   private handleLeftClick(

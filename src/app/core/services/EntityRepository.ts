@@ -64,6 +64,15 @@ export class EntityRepository {
     this.save();
 
   }
+    update(id: string, patch: Partial<Entity>): void {
+
+    this.entities.update(list =>
+      list.map(e => e.id === id ? { ...e, ...patch } : e)
+    );
+
+    this.save();
+
+  }
 
   clear(): void {
 

@@ -1,39 +1,91 @@
 <div class="map-wrapper">
 
-    <div class="team-filter">
+  <div class="team-filter">
 
-        <button
-            class="all"
-            [class.active]="teamFilterService.cesiumFilter() === TeamFilter.All"
-            (click)="setAllForces()">
+    <button class="all" [class.active]="teamFilterService.cesiumFilter() === TeamFilter.All" (click)="setAllForces()">
 
-            👥
+      👥
 
-        </button>
+    </button>
 
-        <button
-            class="blue"
-            [class.active]="teamFilterService.cesiumFilter() === TeamFilter.Blue"
-            (click)="setBlueForces()">
+    <button class="blue" [class.active]="teamFilterService.cesiumFilter() === TeamFilter.Blue"
+      (click)="setBlueForces()">
 
-            🔵
+      🔵
 
-        </button>
+    </button>
 
-        <button
-            class="red"
-            [class.active]="teamFilterService.cesiumFilter() === TeamFilter.Red"
-            (click)="setRedForces()">
+    <button class="red" [class.active]="teamFilterService.cesiumFilter() === TeamFilter.Red" (click)="setRedForces()">
 
-            🔴
+      🔴
 
-        </button>
+    </button>
 
-    </div>
+  </div>
 
-    <div
-        #cesiumContainer
-        class="map">
-    </div>
+  @if (editorState.selectedEntity()?.definition?.entityType === 'RadarSite') {
+  <div class="radar-panel">
+    <h4>Radar settings</h4>
+
+    <label>
+      Sector start (deg)
+      <input type="number" min="0" max="360"
+        [value]="getRadarProp('sectorStartDeg', 0)"
+        (change)="onSectorStartChange($any($event.target).value)">
+    </label>
+
+    <label>
+      Sector sweep (deg, 360 = full circle)
+      <input type="number" min="1" max="360"
+        [value]="getRadarProp('sectorSweepDeg', 360)"
+        (change)="onSectorSweepChange($any($event.target).value)">
+    </label>
+
+    <label>
+      Elevation / mast height (m)
+      <input type="number" min="0" max="200"
+        [value]="getRadarProp('antennaMastHeight', 25)"
+        (change)="onElevationChange($any($event.target).value)">
+    </label>
+
+    @for (zone of radarZoneNames; track zone) {
+      <fieldset class="zone-fieldset">
+        <legend>
+          <input type="checkbox"
+            [checked]="getZoneVisible(zone)"
+            (change)="onZoneVisibilityChange(zone, $any($event.target).checked)">
+          {{ zone }}
+        </legend>
+
+        <label>
+          Range (m)
+          <input type="number" min="500"
+            [value]="getZoneRange(zone) ?? ''"
+            placeholder="default"
+            (change)="onZoneRangeChange(zone, $any($event.target).value)">
+        </label>
+
+        <label>
+          Min elevation (deg)
+          <input type="number" step="0.5"
+            [value]="getZoneMinElevation(zone) ?? ''"
+            placeholder="default"
+            (change)="onZoneMinElevationChange(zone, $any($event.target).value)">
+        </label>
+
+        <label>
+          Max elevation (deg)
+          <input type="number" step="0.5"
+            [value]="getZoneMaxElevation(zone) ?? ''"
+            placeholder="default"
+            (change)="onZoneMaxElevationChange(zone, $any($event.target).value)">
+        </label>
+      </fieldset>
+    }
+  </div>
+}
+
+  <div #cesiumContainer class="map">
+  </div>
 
 </div>
