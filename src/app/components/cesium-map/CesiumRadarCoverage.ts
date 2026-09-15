@@ -290,47 +290,47 @@ export class CesiumRadarCoverage {
             );
 
             if (elevationDeg === elevationRingsDeg[0]) {
-  const ray = rays[0];
+                const ray = rays[0];
 
-  console.log("========== RADAR → F16 TEST ==========");
-  console.log("Ray origin:", ray.origin);
-  console.log("Ray direction:", ray.direction);
+                console.log("========== RADAR → F16 TEST ==========");
+                console.log("Ray origin:", ray.origin);
+                console.log("Ray direction:", ray.direction);
 
-  const primitives = viewer.scene.primitives;
+                const primitives = viewer.scene.primitives;
 
-  for (let i = 0; i < primitives.length; i++) {
-    const primitive = primitives.get(i);
+                for (let i = 0; i < primitives.length; i++) {
+                    const primitive = primitives.get(i);
 
-    if (!(primitive instanceof Cesium.Model)) {
-      continue;
-    }
+                    if (!(primitive instanceof Cesium.Model)) {
+                        continue;
+                    }
 
-    const model = primitive as Cesium.Model;
+                    const model = primitive as Cesium.Model;
 
-    if (!model.ready) {
-      continue;
-    }
+                    if (!model.ready) {
+                        continue;
+                    }
 
-    const intersection = Cesium.IntersectionTests.raySphere(
-      ray,
-      model.boundingSphere
-    );
+                    const intersection = Cesium.IntersectionTests.raySphere(
+                        ray,
+                        model.boundingSphere
+                    );
 
-    console.log("F16 intersection:", intersection);
+                    console.log("F16 intersection:", intersection);
 
-    if (intersection) {
-      console.log(
-  "✅ RADAR RAY HIT F16 at:",
-  intersection.stop,
-  "meters"
-);
-    } else {
-      console.log("❌ RADAR RAY DID NOT HIT F16");
-    }
-  }
+                    if (intersection) {
+                        console.log(
+                            "✅ RADAR RAY HIT F16 at:",
+                            intersection.stop,
+                            "meters"
+                        );
+                    } else {
+                        console.log("❌ RADAR RAY DID NOT HIT F16");
+                    }
+                }
 
-  console.log("=======================================");
-}
+                console.log("=======================================");
+            }
             return CesiumRadarCoverage.castRaysBlockDistances(
                 viewer, terrainProvider, radarPosition, rays, zone.range, rangeSteps, useObjectPicking, objectsToExclude
             );
@@ -616,7 +616,7 @@ export class CesiumRadarCoverage {
 
     private static async castRaysBlockDistances(
 
-        
+
         viewer: Cesium.Viewer,
         terrainProvider: Cesium.TerrainProvider,
         origin: Cesium.Cartesian3,
@@ -716,58 +716,45 @@ export class CesiumRadarCoverage {
             }
         }
 
-        // --- 2. Objects: pickFromRay against loaded primitives (3D Tiles / glTF models). ---
-        //         Opt-in only (useObjectPicking) - this is a real scene intersection
-        //         query per ray and is by far the most expensive part of a rebuild.
-        //         Globe is excluded via objectsToExclude when it does run - terrain
-        //         is judged ONLY by step 1 above, which is LOD-independent.
+        // --- 2. Objects: check loaded GLB models using their bounding spheres ---
+const results: RayBlockResult[] = [];
 
-        const scene = viewer.scene;
-        const results: RayBlockResult[] = [];
+for (let r = 0; r < rays.length; r++) {
 
+    const detectedObjectDistance =
+        objectDetector.getFirstObjectHit(rays[r]);
 
-        for (let r = 0; r < rays.length; r++) {
+    const objectDistance = Math.min(
+        detectedObjectDistance,
+        maxDistance
+    );
 
-            let objectDistance = maxDistance;
+    const rawDistance = Math.min(
+        terrainDistances[r],
+        objectDistance,
+        maxDistance
+    );
 
-            if (useObjectPicking) {
-                try {
-                    // Cast to `any`: pickFromRay exists at runtime in current
-                    // CesiumJS builds, but some installed @types/cesium (or the
-                    // cesium package's own bundled .d.ts) don't declare it yet.
-                    const picked = (scene as any).pickFromRay(rays[r], objectsToExclude) as
-                        { position?: Cesium.Cartesian3; object?: unknown } | undefined;
+    const blocked = rawDistance < maxDistance - 1e-6;
 
-                    if (picked && picked.position && picked.object) {
-                        const d = Cesium.Cartesian3.distance(origin, picked.position);
-                        if (d > 0 && d <= maxDistance) {
-                            objectDistance = d;
-                        }
-                    }
-                } catch {
-                    // primitives not ready / picking unsupported for this frame - ignore
-                }
-            }
+    const point = Cesium.Ray.getPoint(
+        rays[r],
+        rawDistance,
+        new Cesium.Cartesian3()
+    );
 
-            const rawDistance = Math.min(terrainDistances[r], objectDistance, maxDistance);
-            const blocked = rawDistance < maxDistance - 1e-6;
-
+    results.push({
+        distance: rawDistance,
+        point,
+        blocked
+    });
+}
+            
             // Clamp only the point used for rendering, never the "blocked" flag
             // or the reported distance - so a genuinely-blocked ray still shows
             // as a thin sliver of wall instead of collapsing onto the radar dot.
 
-            const point = Cesium.Ray.getPoint(
-                rays[r],
-                rawDistance,
-                new Cesium.Cartesian3()
-            );
-
-            results.push({
-                distance: rawDistance,
-                point,
-                blocked
-            });
-        }
+            
 
         return results;
     }
