@@ -1,4 +1,5 @@
 import * as Cesium from "cesium";
+import { CesiumObjectDetector } from "./CesiumObjectDetector";
 
 // =============================================================================
 // Types
@@ -18,7 +19,7 @@ export interface RadarOptions {
     debugRayStepDeg?: number;     // ray overlay azimuth stride (default 20deg)
     debugRingCount?: number;      // ray overlay elevation rings drawn (default 3)
     useObjectPicking?: boolean;   // also test rays against loaded 3D Tiles/models (default false - this
-                                   // is the expensive part; terrain-only is already accurate and much faster)
+    // is the expensive part; terrain-only is already accurate and much faster)
     zoneOverrides?: Record<string, RadarZoneOverride>;
 }
 
@@ -108,7 +109,7 @@ export class CesiumRadarCoverage {
             sectorSweepDeg = 360,
             drawRays = false,
             azimuthStepDeg = 20,
-            rangeSampleSteps = 20,
+            rangeSampleSteps = 200,
             elevationRingsPerZone = 4,
             debugRayStepDeg = 20,
             debugRingCount = 3,
@@ -217,7 +218,13 @@ export class CesiumRadarCoverage {
                 objectsToExclude
             );
 
-            const meshPrimitive = CesiumRadarCoverage.buildMeshPrimitive(zone, grid.points, azimuthsDeg, isFullCircle);
+            const meshPrimitive = CesiumRadarCoverage.buildMeshPrimitive(
+                zone,
+                grid.points,
+                azimuthsDeg,
+                isFullCircle,
+                radarPosition
+            );
             if (meshPrimitive) {
                 viewer.scene.primitives.add(meshPrimitive);
             }
@@ -281,6 +288,49 @@ export class CesiumRadarCoverage {
             const rays = azimuthsDeg.map(az =>
                 CesiumRadarCoverage.makeRay(radarPosition, enuMatrix, az, elevationDeg)
             );
+
+            if (elevationDeg === elevationRingsDeg[0]) {
+  const ray = rays[0];
+
+  console.log("========== RADAR → F16 TEST ==========");
+  console.log("Ray origin:", ray.origin);
+  console.log("Ray direction:", ray.direction);
+
+  const primitives = viewer.scene.primitives;
+
+  for (let i = 0; i < primitives.length; i++) {
+    const primitive = primitives.get(i);
+
+    if (!(primitive instanceof Cesium.Model)) {
+      continue;
+    }
+
+    const model = primitive as Cesium.Model;
+
+    if (!model.ready) {
+      continue;
+    }
+
+    const intersection = Cesium.IntersectionTests.raySphere(
+      ray,
+      model.boundingSphere
+    );
+
+    console.log("F16 intersection:", intersection);
+
+    if (intersection) {
+      console.log(
+  "✅ RADAR RAY HIT F16 at:",
+  intersection.stop,
+  "meters"
+);
+    } else {
+      console.log("❌ RADAR RAY DID NOT HIT F16");
+    }
+  }
+
+  console.log("=======================================");
+}
             return CesiumRadarCoverage.castRaysBlockDistances(
                 viewer, terrainProvider, radarPosition, rays, zone.range, rangeSteps, useObjectPicking, objectsToExclude
             );
@@ -305,7 +355,8 @@ export class CesiumRadarCoverage {
         zone: ResolvedZone,
         points: Cesium.Cartesian3[][],
         azimuthsDeg: number[],
-        isFullCircle: boolean
+        isFullCircle: boolean,
+        radarPosition: Cesium.Cartesian3
     ): Cesium.Primitive | null {
 
         const ringCount = points.length;
@@ -336,6 +387,17 @@ export class CesiumRadarCoverage {
                 const i01 = indexOf(r, aNext);
                 const i10 = indexOf(r + 1, a);
                 const i11 = indexOf(r + 1, aNext);
+
+                const d00 = Cesium.Cartesian3.distance(radarPosition, points[r][a]);
+                const d01 = Cesium.Cartesian3.distance(radarPosition, points[r][aNext]);
+                const d10 = Cesium.Cartesian3.distance(radarPosition, points[r + 1][a]);
+                const d11 = Cesium.Cartesian3.distance(radarPosition, points[r + 1][aNext]);
+
+                const maxDistance = Math.max(d00, d01, d10, d11);
+                const minDistance = Math.min(d00, d01, d10, d11);
+
+                // Do not create a stretched triangle across a terrain blockage.
+
 
                 indices.push(i00, i10, i11);
                 indices.push(i00, i11, i01);
@@ -550,9 +612,11 @@ export class CesiumRadarCoverage {
     // A ray that's fully blocked right at the radar still renders as this
     // fraction of the zone's range, so it reads as "wall shrinks to almost
     // nothing here" instead of "wall vanishes / you can see straight through".
-    private static readonly MIN_VISIBLE_DISTANCE_FRACTION = 0.02;
+
 
     private static async castRaysBlockDistances(
+
+        
         viewer: Cesium.Viewer,
         terrainProvider: Cesium.TerrainProvider,
         origin: Cesium.Cartesian3,
@@ -562,6 +626,8 @@ export class CesiumRadarCoverage {
         useObjectPicking: boolean,
         objectsToExclude: any[] = []
     ): Promise<RayBlockResult[]> {
+
+        const objectDetector = new CesiumObjectDetector(viewer);
 
         // --- 1. Terrain: one batched sampleTerrainMostDetailed call for ALL rays ---
         //         Sample index 0 per ray is distance 0 (the radar's own position),
@@ -589,16 +655,64 @@ export class CesiumRadarCoverage {
         const terrainDistances: number[] = rays.map(() => maxDistance);
 
         for (let r = 0; r < rays.length; r++) {
-            for (let step = 0; step <= steps; step++) {
+
+            let previousDistance = 0;
+            let previousBlocked = false;
+
+            for (let step = 1; step <= steps; step++) {
 
                 const idx = r * samplesPerRay + step;
-                const groundHeight = sampledTerrain[idx].height ?? 0;
-                const rayHeight = Cesium.Cartographic.fromCartesian(flatPoints[idx]).height;
 
-                if (groundHeight >= rayHeight) {
-                    terrainDistances[r] = flatDistances[idx];
+                const groundHeight = sampledTerrain[idx].height ?? 0;
+                const rayHeight =
+                    Cesium.Cartographic.fromCartesian(flatPoints[idx]).height;
+
+                const blocked = groundHeight >= rayHeight;
+
+                if (blocked) {
+
+                    const currentDistance = flatDistances[idx];
+
+                    // Refine the blockage location between
+                    // previousDistance and currentDistance.
+                    let low = previousDistance;
+                    let high = currentDistance;
+
+                    for (let i = 0; i < 9; i++) {
+
+                        const mid = (low + high) / 2;
+
+                        const midPoint = Cesium.Ray.getPoint(
+                            rays[r],
+                            mid,
+                            new Cesium.Cartesian3()
+                        );
+
+                        const midCartographic =
+                            Cesium.Cartographic.fromCartesian(midPoint);
+
+                        const [terrainSample] =
+                            await Cesium.sampleTerrainMostDetailed(
+                                terrainProvider,
+                                [midCartographic]
+                            );
+
+                        const midGroundHeight =
+                            terrainSample.height ?? 0;
+
+                        if (midGroundHeight >= midCartographic.height) {
+                            high = mid;
+                        } else {
+                            low = mid;
+                        }
+                    }
+
+                    terrainDistances[r] = high;
                     break;
                 }
+
+                previousDistance = flatDistances[idx];
+                previousBlocked = blocked;
             }
         }
 
@@ -610,7 +724,7 @@ export class CesiumRadarCoverage {
 
         const scene = viewer.scene;
         const results: RayBlockResult[] = [];
-        const minVisibleDistance = maxDistance * CesiumRadarCoverage.MIN_VISIBLE_DISTANCE_FRACTION;
+
 
         for (let r = 0; r < rays.length; r++) {
 
@@ -641,8 +755,12 @@ export class CesiumRadarCoverage {
             // Clamp only the point used for rendering, never the "blocked" flag
             // or the reported distance - so a genuinely-blocked ray still shows
             // as a thin sliver of wall instead of collapsing onto the radar dot.
-            const renderDistance = blocked ? Math.max(rawDistance, minVisibleDistance) : rawDistance;
-            const point = Cesium.Ray.getPoint(rays[r], renderDistance, new Cesium.Cartesian3());
+
+            const point = Cesium.Ray.getPoint(
+                rays[r],
+                rawDistance,
+                new Cesium.Cartesian3()
+            );
 
             results.push({
                 distance: rawDistance,

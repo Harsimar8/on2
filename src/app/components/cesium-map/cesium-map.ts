@@ -21,6 +21,7 @@ import { TeamFilterService } from '../../core/services/TeamFilterService';
 import { MapSyncService } from '../../core/services/MapSync';
 import { CesiumSelection } from "./CesiumSelection";
 import { BuildingLayer } from './layers/BuildingLayer';
+import { CesiumObjectDetector } from './CesiumObjectDetector';
 
 
 
@@ -130,6 +131,7 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
   private placement!: CesiumPlacement;
   private hover!: CesiumHover;
   private selection!: CesiumSelection;
+  private objectDetector!: CesiumObjectDetector;
   protected readonly TeamFilter = TeamFilter;
 
   private readonly entityRepository = inject(EntityRepository);
@@ -147,11 +149,11 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
   async ngAfterViewInit(): Promise<void> {
 
     const terrainProvider =
-    await Cesium.createWorldTerrainAsync();
+      await Cesium.createWorldTerrainAsync();
 
-this.viewer = new Cesium.Viewer(
-    this.cesiumContainer.nativeElement,
-    {
+    this.viewer = new Cesium.Viewer(
+      this.cesiumContainer.nativeElement,
+      {
         terrainProvider: terrainProvider,
 
         animation: false,
@@ -165,30 +167,31 @@ this.viewer = new Cesium.Viewer(
         infoBox: false,
         selectionIndicator: false,
         requestRenderMode: true,
+
         maximumRenderTimeChange: Infinity,
         terrainShadows: Cesium.ShadowMode.RECEIVE_ONLY,
-    }
-);
+      }
+    );
 
-console.log(
-    "TERRAIN PROVIDER:",
-    terrainProvider
-);
+    console.log(
+      "TERRAIN PROVIDER:",
+      terrainProvider
+    );
 
 
 
-this.viewer.camera.setView({
-  destination: Cesium.Cartesian3.fromDegrees(
-    78.04386500,   // longitude
-    30.34014610,   // latitude
-    800            // camera height in meters
-  ),
-  orientation: {
-    heading: 0.0,
-    pitch: Cesium.Math.toRadians(-45),
-    roll: 0.0
-  }
-});
+    this.viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(
+        78.04386500,   // longitude
+        30.34014610,   // latitude
+        800            // camera height in meters
+      ),
+      orientation: {
+        heading: 0.0,
+        pitch: Cesium.Math.toRadians(-45),
+        roll: 0.0
+      }
+    });
     console.log(
       this.viewer.scene.screenSpaceCameraController.enableZoom
     );
@@ -202,21 +205,23 @@ this.viewer.camera.setView({
 
     this.viewer.scene.fog.enabled = false;
 
-   this.viewer.scene.globe.enableLighting = false;
+    this.viewer.scene.globe.enableLighting = false;
 
     this.viewer.scene.light = new Cesium.SunLight({
       intensity: 1.6
     });
 
- this.viewer.scene.globe.depthTestAgainstTerrain = true;
-   
+    this.viewer.scene.globe.depthTestAgainstTerrain = true;
 
-await BuildingLayer.load(this.viewer);
+
+    await BuildingLayer.load(this.viewer);
+
+    await this.loadTestGLBs();
 
 
     this.renderer = new CesiumEntityRenderer(
       this.viewer,
-       terrainProvider,
+      terrainProvider,
       this.teamFilterService,
       this.editorState
     );
@@ -324,7 +329,7 @@ await BuildingLayer.load(this.viewer);
         this.viewer.scene.canvas.clientHeight
       );
 
-      
+
 
       this.mapSync.update({
 
@@ -384,138 +389,161 @@ await BuildingLayer.load(this.viewer);
   private isPointInPolygon(
     point: Cesium.Cartographic,
     polygon: Cesium.Cartographic[]
-): boolean {
+  ): boolean {
 
     let inside = false;
 
     for (
-        let i = 0, j = polygon.length - 1;
-        i < polygon.length;
-        j = i++
+      let i = 0, j = polygon.length - 1;
+      i < polygon.length;
+      j = i++
     ) {
 
-        const xi = Cesium.Math.toDegrees(polygon[i].longitude);
-        const yi = Cesium.Math.toDegrees(polygon[i].latitude);
+      const xi = Cesium.Math.toDegrees(polygon[i].longitude);
+      const yi = Cesium.Math.toDegrees(polygon[i].latitude);
 
-        const xj = Cesium.Math.toDegrees(polygon[j].longitude);
-        const yj = Cesium.Math.toDegrees(polygon[j].latitude);
+      const xj = Cesium.Math.toDegrees(polygon[j].longitude);
+      const yj = Cesium.Math.toDegrees(polygon[j].latitude);
 
-        const x = Cesium.Math.toDegrees(point.longitude);
-        const y = Cesium.Math.toDegrees(point.latitude);
+      const x = Cesium.Math.toDegrees(point.longitude);
+      const y = Cesium.Math.toDegrees(point.latitude);
 
-        const intersect =
-            ((yi > y) !== (yj > y)) &&
-            (x <
-                (xj - xi) *
-                    (y - yi) /
-                    (yj - yi) +
-                    xi);
+      const intersect =
+        ((yi > y) !== (yj > y)) &&
+        (x <
+          (xj - xi) *
+          (y - yi) /
+          (yj - yi) +
+          xi);
 
-        if (intersect) {
-            inside = !inside;
-        }
+      if (intersect) {
+        inside = !inside;
+      }
     }
 
     return inside;
-}
+  }
 
-// Full zone configs (name + color + defaults) for the panel
-protected readonly radarZones = CesiumRadarCoverage.DEFAULT_3D_ZONES;
+  // Full zone configs (name + color + defaults) for the panel
+  protected readonly radarZones = CesiumRadarCoverage.DEFAULT_3D_ZONES;
 
-private getRadarProps(): Record<string, any> {
+  private getRadarProps(): Record<string, any> {
     return (this.editorState.selectedEntity()?.definition?.properties as any) ?? {};
-}
+  }
 
-protected getRadarProp<T>(key: string, fallback: T): T {
+  protected getRadarProp<T>(key: string, fallback: T): T {
     return this.getRadarProps()[key] ?? fallback;
-}
+  }
 
-protected getZoneVisible(zone: string): boolean {
+  protected getZoneVisible(zone: string): boolean {
     return (this.getRadarProps()['zoneVisibility']?.[zone]) ?? true;
-}
+  }
 
-protected getZoneRange(zone: string): number | null {
+  protected getZoneRange(zone: string): number | null {
     return this.getRadarProps()['zoneRanges']?.[zone] ?? null;
-}
+  }
 
-protected getZoneMaxElevation(zone: string): number | null {
+  protected getZoneMaxElevation(zone: string): number | null {
     return this.getRadarProps()['zoneElevations']?.[zone]?.max ?? null;
-}
+  }
 
-protected zoneDefaultRange(zoneName: string): number {
+  protected zoneDefaultRange(zoneName: string): number {
     return this.radarZones.find(z => z.name === zoneName)?.defaultRange ?? 0;
-}
+  }
 
-protected zoneDefaultMaxElevation(zoneName: string): number {
+  protected zoneDefaultMaxElevation(zoneName: string): number {
     return this.radarZones.find(z => z.name === zoneName)?.defaultMaxElevationDeg ?? 0;
-}
+  }
 
-onSectorStartChange(value: string): void {
+  onSectorStartChange(value: string): void {
     this.updateRadarProperty({ sectorStartDeg: +value });
-}
+  }
 
-onSectorSweepChange(value: string): void {
+  onSectorSweepChange(value: string): void {
     this.updateRadarProperty({ sectorSweepDeg: +value });
-}
+  }
 
-onElevationChange(value: string): void {
+  onElevationChange(value: string): void {
     this.updateRadarProperty({ antennaMastHeight: +value });
-}
+  }
 
-onZoneVisibilityChange(zone: string, checked: boolean): void {
+  onZoneVisibilityChange(zone: string, checked: boolean): void {
     const current = this.getRadarProp<Record<string, boolean>>('zoneVisibility', {});
     this.updateRadarProperty({ zoneVisibility: { ...current, [zone]: checked } });
-}
+  }
 
-onZoneRangeChange(zone: string, value: string): void {
+  onZoneRangeChange(zone: string, value: string): void {
     const current = this.getRadarProp<Record<string, number>>('zoneRanges', {});
     this.updateRadarProperty({ zoneRanges: { ...current, [zone]: +value } });
-}
+  }
 
-onZoneMaxElevationChange(zone: string, value: string): void {
+  onZoneMaxElevationChange(zone: string, value: string): void {
     const current = this.getRadarProp<Record<string, { min: number; max: number }>>('zoneElevations', {});
     this.updateRadarProperty({
-        zoneElevations: { ...current, [zone]: { ...current[zone], min: current[zone]?.min ?? 0, max: +value } }
+      zoneElevations: { ...current, [zone]: { ...current[zone], min: current[zone]?.min ?? 0, max: +value } }
     });
-}
+  }
 
-onDrawRaysChange(checked: boolean): void {
+  onDrawRaysChange(checked: boolean): void {
     this.updateRadarProperty({ drawRays: checked });
-}
+  }
 
-toggleDrawRays(): void {
+  toggleDrawRays(): void {
     this.onDrawRaysChange(!this.getRadarProp('drawRays', false));
-}
+  }
 
-refreshRadarCoverage(): void {
+  refreshRadarCoverage(): void {
     const entity = this.editorState.selectedEntity();
     if (!entity || entity.definition.entityType !== 'RadarSite') return;
 
     this.renderer?.forceRebuild(entity.id);
     this.renderer?.render(this.entityRepository.all());
-}
+  }
 
-closeRadarPanel(): void {
+  closeRadarPanel(): void {
     this.radarPanelClosed.set(true);
-}
+  }
 
-updateRadarProperty(patch: Record<string, unknown>): void {
+  updateRadarProperty(patch: Record<string, unknown>): void {
     const entity = this.editorState.selectedEntity();
     if (!entity || entity.definition.entityType !== 'RadarSite') return;
 
     const updatedProperties = { ...entity.definition.properties, ...patch };
     const updatedEntity = {
-        ...entity,
-        definition: { ...entity.definition, properties: updatedProperties }
+      ...entity,
+      definition: { ...entity.definition, properties: updatedProperties }
     };
 
     this.entityRepository.update(entity.id, { definition: updatedEntity.definition });
     this.editorState.selectedEntity.set(updatedEntity);
-}
+  }
 
   private handleLeftClick(
     click: Cesium.ScreenSpaceEventHandler.PositionedEvent
   ): void {
+
+    // Get terrain position at clicked location
+    const cartesian = this.viewer.scene.pickPosition(click.position);
+
+    if (Cesium.defined(cartesian)) {
+
+      const cartographic =
+        Cesium.Cartographic.fromCartesian(cartesian);
+
+      const longitude =
+        Cesium.Math.toDegrees(cartographic.longitude);
+
+      const latitude =
+        Cesium.Math.toDegrees(cartographic.latitude);
+
+      const height =
+        cartographic.height;
+
+      console.log("CLICKED LOCATION");
+      console.log("Longitude:", longitude);
+      console.log("Latitude:", latitude);
+      console.log("Height:", height);
+    }
 
     if (this.editorState.placementMode()) {
 
@@ -526,7 +554,6 @@ updateRadarProperty(patch: Record<string, unknown>): void {
       this.selection.selectEntity(click);
 
     }
-
   }
 
   public resize(): void {
@@ -534,6 +561,59 @@ updateRadarProperty(patch: Record<string, unknown>): void {
     this.viewer.resize();
 
   }
+
+
+ private async loadTestGLBs(): Promise<void> {
+
+  const longitude = 74.89513005356172;
+  const latitude = 31.54178024749536;
+  const terrainHeight = 179.27878368853075;
+
+  const height = terrainHeight + 20;
+
+  const model = await Cesium.Model.fromGltfAsync({
+    url: 'assets/models/F_16.glb',
+
+    scale: 50,
+
+    modelMatrix: Cesium.Transforms.eastNorthUpToFixedFrame(
+      Cesium.Cartesian3.fromDegrees(
+        longitude,
+        latitude,
+        height
+      )
+    )
+  });
+
+  this.viewer.scene.primitives.add(model);
+
+  console.log("F16 ADDED TO SCENE");
+  console.log("MODEL READY:", model.ready);
+
+  model.readyEvent.addEventListener(() => {
+
+  console.log("========== F16 READY ==========");
+  console.log("MODEL READY:", model.ready);
+
+  const sphere = model.boundingSphere;
+
+  console.log("CENTER:", sphere.center);
+  console.log("RADIUS:", sphere.radius);
+
+  console.log("================================");
+});
+
+  console.log("STARTING FLY TO F16");
+
+  this.viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(
+      longitude,
+      latitude,
+      500
+    ),
+    duration: 2
+  });
+}
 
   ngOnDestroy(): void {
 
