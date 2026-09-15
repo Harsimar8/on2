@@ -6,13 +6,9 @@ import { EntityRepository } from "../../core/services/EntityRepository";
 export class CesiumSelection {
 
     constructor(
-
         private viewer: Cesium.Viewer,
-
         private editorState: EditorState,
-
         private entityRepository: EntityRepository
-
     ) {}
 
     selectEntity(
@@ -22,11 +18,8 @@ export class CesiumSelection {
         const picked = this.viewer.scene.pick(click.position);
 
         if (!Cesium.defined(picked)) {
-
             this.editorState.selectedEntity.set(null);
-
             return;
-
         }
 
         const pickedEntity = (picked as any).id;
@@ -35,16 +28,17 @@ export class CesiumSelection {
             return;
         }
 
+        // If a 3D radar wall, cap, or ray was clicked, select its parent radar entity
+        const targetId = pickedEntity.radarParentId || pickedEntity.id;
+
         const entity = this.entityRepository
             .all()
-            .find(e => e.id === pickedEntity.id);
+            .find(e => e.id === targetId);
 
         if (!entity) {
             return;
         }
 
         this.editorState.selectedEntity.set(entity);
-
     }
-
 }

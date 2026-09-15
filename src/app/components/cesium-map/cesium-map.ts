@@ -5,11 +5,12 @@ import {
   OnDestroy,
   ViewChild,
   inject,
-  effect
+  effect,
+  signal
 } from '@angular/core';
 
 import * as Cesium from 'cesium';
-import { Cesium3DRadarCoverage } from './CesiumRadarCoverage';
+import { CesiumRadarCoverage } from './CesiumRadarCoverage';
 import { CesiumPlacement } from './CesiumPlacement';
 import { CesiumEntityRenderer } from "./CesiumEntityRenderer";
 import { CesiumHover } from "./CesiumHover";
@@ -20,8 +21,7 @@ import { TeamFilterService } from '../../core/services/TeamFilterService';
 import { MapSyncService } from '../../core/services/MapSync';
 import { CesiumSelection } from "./CesiumSelection";
 import { BuildingLayer } from './layers/BuildingLayer';
-import { VegetationLayer } from './layers/VegetationLayer';
-import { RoadLayer } from './layers/RoadLayer';
+
 
 
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIxNzFhZjQzZC0xNGNmLTQyNDAtOTFlMC1jMmEyMDQwOTExNDAiLCJpZCI6NDQyMjYxLCJzdWIiOiJIYXJzaW1hcjA4IiwiaXNzIjoiaHR0cHM6Ly9hcGkuY2VzaXVtLmNvbSIsImF1ZCI6Im1pc3Npb24iLCJpYXQiOjE3ODQwMDU4MjB9.NzxkVB0Hlz8uYySEa5PaSg7bycWumdeeUXiaJgk57XY';
@@ -106,6 +106,18 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
 
     });
 
+    // Re-open the radar panel automatically whenever a *different* entity
+    // gets selected, but respect an explicit close (X) for the current one.
+    effect(() => {
+      const selected = this.editorState.selectedEntity();
+      const id = selected?.id ?? null;
+
+      if (id !== this.lastSelectedEntityId) {
+        this.lastSelectedEntityId = id;
+        this.radarPanelClosed.set(false);
+      }
+    });
+
   }
 
   @ViewChild('cesiumContainer', { static: true })
@@ -128,6 +140,9 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
   private syncing = false;
   private syncTimeout?: ReturnType<typeof setTimeout>;
   private cesiumSyncFrame: number | null = null;
+
+  private lastSelectedEntityId: string | null = null;
+  protected readonly radarPanelClosed = signal(false);
 
   async ngAfterViewInit(): Promise<void> {
 
@@ -403,7 +418,9 @@ await BuildingLayer.load(this.viewer);
 
     return inside;
 }
-protected readonly radarZoneNames = Cesium3DRadarCoverage.DEFAULT_3D_ZONES.map(z => z.name);
+
+// Full zone configs (name + color + defaults) for the panel
+protected readonly radarZones = CesiumRadarCoverage.DEFAULT_3D_ZONES;
 
 private getRadarProps(): Record<string, any> {
     return (this.editorState.selectedEntity()?.definition?.properties as any) ?? {};
@@ -421,12 +438,16 @@ protected getZoneRange(zone: string): number | null {
     return this.getRadarProps()['zoneRanges']?.[zone] ?? null;
 }
 
-protected getZoneMinElevation(zone: string): number | null {
-    return this.getRadarProps()['zoneElevations']?.[zone]?.min ?? null;
-}
-
 protected getZoneMaxElevation(zone: string): number | null {
     return this.getRadarProps()['zoneElevations']?.[zone]?.max ?? null;
+}
+
+protected zoneDefaultRange(zoneName: string): number {
+    return this.radarZones.find(z => z.name === zoneName)?.defaultRange ?? 0;
+}
+
+protected zoneDefaultMaxElevation(zoneName: string): number {
+    return this.radarZones.find(z => z.name === zoneName)?.defaultMaxElevationDeg ?? 0;
 }
 
 onSectorStartChange(value: string): void {
@@ -451,19 +472,33 @@ onZoneRangeChange(zone: string, value: string): void {
     this.updateRadarProperty({ zoneRanges: { ...current, [zone]: +value } });
 }
 
-onZoneMinElevationChange(zone: string, value: string): void {
-    const current = this.getRadarProp<Record<string, { min: number; max: number }>>('zoneElevations', {});
-    this.updateRadarProperty({
-        zoneElevations: { ...current, [zone]: { ...current[zone], min: +value } }
-    });
-}
-
 onZoneMaxElevationChange(zone: string, value: string): void {
     const current = this.getRadarProp<Record<string, { min: number; max: number }>>('zoneElevations', {});
     this.updateRadarProperty({
-        zoneElevations: { ...current, [zone]: { ...current[zone], max: +value } }
+        zoneElevations: { ...current, [zone]: { ...current[zone], min: current[zone]?.min ?? 0, max: +value } }
     });
 }
+
+onDrawRaysChange(checked: boolean): void {
+    this.updateRadarProperty({ drawRays: checked });
+}
+
+toggleDrawRays(): void {
+    this.onDrawRaysChange(!this.getRadarProp('drawRays', false));
+}
+
+refreshRadarCoverage(): void {
+    const entity = this.editorState.selectedEntity();
+    if (!entity || entity.definition.entityType !== 'RadarSite') return;
+
+    this.renderer?.forceRebuild(entity.id);
+    this.renderer?.render(this.entityRepository.all());
+}
+
+closeRadarPanel(): void {
+    this.radarPanelClosed.set(true);
+}
+
 updateRadarProperty(patch: Record<string, unknown>): void {
     const entity = this.editorState.selectedEntity();
     if (!entity || entity.definition.entityType !== 'RadarSite') return;

@@ -5,49 +5,36 @@ import { EditorState } from "../../core/state/EditorState";
 import { TeamFilterService } from "../../core/services/TeamFilterService";
 import { Team } from "../../core/types/Team";
 import { TeamFilter } from "../../core/models/TeamFilter";
-import { Cesium3DRadarCoverage } from "./CesiumRadarCoverage";
+import { CesiumRadarCoverage, RadarCoverageHandle, RadarZoneOverride } from "./CesiumRadarCoverage";
 
 export class CesiumEntityRenderer {
-    // Stores 3D radar entities by entity.id so they can be cleaned up cleanly
-    private readonly radarEntities = new Map<string, Cesium.Entity[]>();
 
-    // Remembers the exact position we last BUILT radar coverage for, per
-    // entity id. If render() gets called again (camera move, hover,
-    // selection change, anything) and the position hasn't actually
-    // changed, we skip rebuilding entirely and just re-add the cached
-    // entities. Without this, every single render() call re-samples
-    // terrain from scratch - and since terrain LOD changes continuously as
-    // the camera moves/zooms, that made the whole ray fan visibly "swim"
-    // on every pan/zoom instead of only updating when the radar moves.
-    private readonly lastBuiltPosition = new Map<string, { lon: number; lat: number }>();
+    // Live radar coverage handles, keyed by source entity.id
+    private readonly radarEntities = new Map<string, RadarCoverageHandle[]>();
 
-    private renderGeneration = 0;
+    // Signature of the exact inputs (position + radar properties) that the
+    // currently-built coverage for an entity was generated from. If a
+    // render() call comes in and nothing in this signature changed, we skip
+    // rebuilding entirely - this is what stops the ray fan from swimming
+    // on every camera pan/zoom/selection change.
+    private readonly lastBuiltSignature = new Map<string, string>();
+
+    // Guards against overlapping async rebuilds for the same entity
+    private readonly buildInFlight = new Set<string>();
 
     constructor(
         private viewer: Cesium.Viewer,
         private terrainProvider: Cesium.TerrainProvider,
         private teamFilterService: TeamFilterService,
         private editorState: EditorState
-    ) {}
+    ) { }
 
     render(entities: Entity[]): void {
-        const myGeneration = ++this.renderGeneration;
         const filter = this.teamFilterService.cesiumFilter();
+        const seenIds = new Set<string>();
 
-        // 1. Remove all billboards and standard entities
-        this.viewer.entities.removeAll();
-
-        // 2. Remove previously created 3D radar entities from the scene
-        // (but keep them in `radarEntities` - we may just re-add the same
-        // objects below instead of rebuilding them).
-        for (const [_, entityList] of this.radarEntities) {
-            for (const ent of entityList) {
-                this.viewer.entities.remove(ent);
-            }
-        }
-
-        // 3. Re-draw visible entities
         for (const entity of entities) {
+
             if (
                 (filter === TeamFilter.Blue && entity.team !== Team.Blue) ||
                 (filter === TeamFilter.Red && entity.team !== Team.Red)
@@ -55,142 +42,197 @@ export class CesiumEntityRenderer {
                 continue;
             }
 
-            this.drawRadar(entity);
-            this.drawTeamDot(entity);
-
             if (entity.definition.entityType === "RadarSite") {
-                this.drawTerrainRadarCone(entity, myGeneration);
+                seenIds.add(entity.id);
+                this.syncRadarCoverage(entity);
+            }
+        }
+
+        // Clean up coverage for radars that no longer exist / no longer pass the filter
+        for (const existingId of Array.from(this.radarEntities.keys())) {
+            if (!seenIds.has(existingId)) {
+                this.removeRadarCoverage(existingId);
             }
         }
 
         this.viewer.scene.requestRender();
     }
 
-    private async drawTerrainRadarCone(entity: Entity, myGeneration: number): Promise<void> {
-        const lastPos = this.lastBuiltPosition.get(entity.id);
-        const positionUnchanged =
-            lastPos !== undefined &&
-            lastPos.lon === entity.position.longitude &&
-            lastPos.lat === entity.position.latitude;
+    /** Drops the cached signature so the next render() call rebuilds this radar from scratch. */
+    forceRebuild(entityId: string): void {
+        this.lastBuiltSignature.delete(entityId);
+    }
 
-        const cached = this.radarEntities.get(entity.id);
-
-        if (positionUnchanged && cached) {
-            // Nothing actually moved - just re-add the SAME entity objects
-            // we already built, instead of re-sampling terrain and
-            // rebuilding everything from scratch.
-            for (const ent of cached) {
-                this.viewer.entities.add(ent);
+    private removeRadarCoverage(entityId: string): void {
+        const existing = this.radarEntities.get(entityId);
+        if (existing) {
+            for (const handle of existing) {
+                handle.dispose();
             }
-            this.viewer.scene.requestRender();
+        }
+        this.radarEntities.delete(entityId);
+        this.lastBuiltSignature.delete(entityId);
+    }
+
+    private buildSignature(entity: Entity): string {
+        const props = (entity.definition.properties as any) ?? {};
+        return JSON.stringify({
+            lon: entity.position.longitude,
+            lat: entity.position.latitude,
+            alt: entity.position.altitude,
+            sectorStartDeg: props.sectorStartDeg ?? 0,
+            sectorSweepDeg: props.sectorSweepDeg ?? 360,
+            antennaMastHeight: props.antennaMastHeight ?? 0,
+            drawRays: props.drawRays ?? false,
+            zoneVisibility: props.zoneVisibility ?? {},
+            zoneRanges: props.zoneRanges ?? {},
+            zoneElevations: props.zoneElevations ?? {}
+        });
+    }
+
+    private async syncRadarCoverage(entity: Entity): Promise<void> {
+
+        const signature = this.buildSignature(entity);
+
+        if (this.lastBuiltSignature.get(entity.id) === signature) {
+            // Nothing relevant changed - keep existing entities as-is.
             return;
         }
 
+        if (this.buildInFlight.has(entity.id)) {
+            // A build is already running for this entity; the signature
+            // check above will pick up any further changes on the next tick.
+            return;
+        }
+
+        this.buildInFlight.add(entity.id);
+
         try {
 
-            const radar3DEntities = await Cesium3DRadarCoverage.create3DRadarZones(
+            const props = (entity.definition.properties as any) ?? {};
+
+            const zoneOverrides: Record<string, RadarZoneOverride> = {};
+            for (const zone of CesiumRadarCoverage.DEFAULT_3D_ZONES) {
+                zoneOverrides[zone.name] = {
+                    visible: props.zoneVisibility?.[zone.name] ?? true,
+                    range: props.zoneRanges?.[zone.name],
+                    minElevationDeg: props.zoneElevations?.[zone.name]?.min,
+                    maxElevationDeg: props.zoneElevations?.[zone.name]?.max
+                };
+            }
+
+            const newHandles = await CesiumRadarCoverage.create3DRadarZones(
                 this.viewer,
                 this.terrainProvider,
                 {
                     longitude: entity.position.longitude,
                     latitude: entity.position.latitude,
-                    antennaMastHeight: 0,
-                    numAzimuths: 144,
-                    showDebugRays: true,
-                    zones: Cesium3DRadarCoverage.DEFAULT_3D_ZONES
+                    altitude: entity.position.altitude,
+                    mastHeight: props.antennaMastHeight ?? 0,
+                    sectorStartDeg: props.sectorStartDeg ?? 0,
+                    sectorSweepDeg: props.sectorSweepDeg ?? 360,
+                    drawRays: props.drawRays ?? false,
+                    // Multi-ring precision sampling, tuned for a reasonable rebuild
+                    // cost by default. Raise these per-radar via entity properties
+                    // if you want finer detail and can afford the extra terrain
+                    // sampling calls (cost scales as azimuths x rings x steps).
+                    azimuthStepDeg: props.azimuthStepDeg ?? 10,
+                    elevationRingsPerZone: props.elevationRingsPerZone ?? 4,
+                    rangeSampleSteps: props.rangeSampleSteps ?? 20,
+                    // Off by default: this is the expensive part (one real scene
+                    // intersection query per sampled ray) and only matters if you
+                    // actually have 3D Tiles/buildings loaded for radar to see.
+                    useObjectPicking: props.useObjectPicking ?? false,
+                    zoneOverrides
                 }
             );
 
-            // If a newer render() has started since this call began (e.g.
-            // the entity moved again before this finished), discard this
-            // stale result instead of adding it.
-            if (myGeneration !== this.renderGeneration) {
-                for (const ent of radar3DEntities) {
-                    this.viewer.entities.remove(ent);
+            // Swap old -> new only after the new build succeeds
+            const old = this.radarEntities.get(entity.id);
+            if (old) {
+                for (const handle of old) {
+                    handle.dispose();
                 }
-                return;
             }
 
-            this.radarEntities.set(entity.id, radar3DEntities);
-            this.lastBuiltPosition.set(entity.id, {
-                lon: entity.position.longitude,
-                lat: entity.position.latitude
-            });
+            this.radarEntities.set(entity.id, newHandles);
+            this.lastBuiltSignature.set(entity.id, signature);
 
             this.viewer.scene.requestRender();
+
         } catch (err) {
             console.error("Failed to render 3D radar coverage:", err);
+        } finally {
+            this.buildInFlight.delete(entity.id);
         }
     }
 
-
     private drawRadar(entity: Entity): void {
-    const selected =
-        this.editorState.selectedEntity()?.id === entity.id;
+        const selected =
+            this.editorState.selectedEntity()?.id === entity.id;
 
-    this.viewer.entities.add({
-        id: entity.id,
+        this.viewer.entities.add({
+            id: entity.id,
 
-        position: Cesium.Cartesian3.fromDegrees(
-            entity.position.longitude,
-            entity.position.latitude,
-            entity.position.altitude
-        ),
-
-        billboard: {
-            image: EntityIconFactory.get(
-                entity.definition.entityType
+            position: Cesium.Cartesian3.fromDegrees(
+                entity.position.longitude,
+                entity.position.latitude,
+                entity.position.altitude
             ),
 
-            width: selected ? 36 : 32,
-            height: selected ? 36 : 32,
+            billboard: {
+                image: EntityIconFactory.get(
+                    entity.definition.entityType
+                ),
 
-            scale: selected ? 1.08 : 1.0,
+                width: selected ? 36 : 32,
+                height: selected ? 36 : 32,
 
-            color: selected
-                ? Cesium.Color.fromCssColorString("#FFF8DC")
-                : Cesium.Color.WHITE,
+                scale: selected ? 1.08 : 1.0,
 
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-
-            verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-            horizontalOrigin: Cesium.HorizontalOrigin.CENTER
-        }
-    });
-}
-
-
-      private drawTeamDot(entity: Entity): void {
-    this.viewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(
-            entity.position.longitude,
-            entity.position.latitude,
-            entity.position.altitude
-        ),
-
-        billboard: {
-            image:
-                entity.team === "Blue"
-                    ? "assets/blue.png"
-                    : "assets/red.png",
-
-            color:
-                entity.team === "Blue"
-                    ? Cesium.Color.fromCssColorString("#3B82F6")
+                color: selected
+                    ? Cesium.Color.fromCssColorString("#FFF8DC")
                     : Cesium.Color.WHITE,
 
-            width: 16,
-            height: 16,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
 
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
 
-            verticalOrigin: Cesium.VerticalOrigin.CENTER,
-            horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+                verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+                horizontalOrigin: Cesium.HorizontalOrigin.CENTER
+            }
+        });
+    }
 
-            disableDepthTestDistance: Number.POSITIVE_INFINITY
-        }
-    });
-}
+    private drawTeamDot(entity: Entity): void {
+        this.viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(
+                entity.position.longitude,
+                entity.position.latitude,
+                entity.position.altitude
+            ),
+
+            billboard: {
+                image:
+                    entity.team === "Blue"
+                        ? "assets/blue.png"
+                        : "assets/red.png",
+
+                color:
+                    entity.team === "Blue"
+                        ? Cesium.Color.fromCssColorString("#3B82F6")
+                        : Cesium.Color.WHITE,
+
+                width: 16,
+                height: 16,
+
+                heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+
+                verticalOrigin: Cesium.VerticalOrigin.CENTER,
+                horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+
+                disableDepthTestDistance: Number.POSITIVE_INFINITY
+            }
+        });
+    }
 }

@@ -22,7 +22,7 @@ export class EditorState {
 
   readonly selectedTeam = signal<Team>(Team.Blue);
 
-   readonly viewMode = signal<ViewMode>(ViewMode.Split);
+   readonly viewMode = signal<ViewMode>(ViewMode.ThreeD);
 
   
 

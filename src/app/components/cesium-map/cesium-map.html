@@ -23,65 +23,106 @@
 
   </div>
 
-  @if (editorState.selectedEntity()?.definition?.entityType === 'RadarSite') {
+  @if (editorState.selectedEntity()?.definition?.entityType === 'RadarSite' && !radarPanelClosed()) {
   <div class="radar-panel">
-    <h4>Radar settings</h4>
 
-    <label>
-      Sector start (deg)
-      <input type="number" min="0" max="360"
-        [value]="getRadarProp('sectorStartDeg', 0)"
-        (change)="onSectorStartChange($any($event.target).value)">
-    </label>
+    <div class="radar-panel__header">
+      <div class="radar-panel__title-group">
+        <span class="radar-panel__icon">📡</span>
+        <div>
+          <div class="radar-panel__title">3D Radar Coverage</div>
+          <div class="radar-panel__subtitle">
+            {{ editorState.selectedEntity()?.definition?.name ?? editorState.selectedEntity()?.id }}
+          </div>
+        </div>
+      </div>
 
-    <label>
-      Sector sweep (deg, 360 = full circle)
-      <input type="number" min="1" max="360"
-        [value]="getRadarProp('sectorSweepDeg', 360)"
-        (change)="onSectorSweepChange($any($event.target).value)">
-    </label>
+      <div class="radar-panel__actions">
+        <button
+          class="rays-pill"
+          [class.on]="getRadarProp('drawRays', false)"
+          (click)="toggleDrawRays()">
+          <span class="rays-pill__dot"></span>
+          Rays: {{ getRadarProp('drawRays', false) ? 'ON' : 'OFF' }}
+        </button>
 
-    <label>
-      Elevation / mast height (m)
-      <input type="number" min="0" max="200"
-        [value]="getRadarProp('antennaMastHeight', 25)"
-        (change)="onElevationChange($any($event.target).value)">
-    </label>
+        <button class="icon-btn" title="Refresh coverage" (click)="refreshRadarCoverage()">↻</button>
+        <button class="icon-btn" title="Close" (click)="closeRadarPanel()">✕</button>
+      </div>
+    </div>
 
-    @for (zone of radarZoneNames; track zone) {
-      <fieldset class="zone-fieldset">
-        <legend>
+    <div class="radar-panel__body">
+
+      <section class="radar-section">
+        <h4 class="radar-section__title">Antenna &amp; Sector</h4>
+
+        <label class="field">
+          <span>Sector Start (°)</span>
+          <input type="number" min="0" max="360"
+            [value]="getRadarProp('sectorStartDeg', 0)"
+            (change)="onSectorStartChange($any($event.target).value)">
+        </label>
+
+        <label class="field">
+          <span>Sector Sweep (°)</span>
+          <input type="number" min="1" max="360"
+            [value]="getRadarProp('sectorSweepDeg', 360)"
+            (change)="onSectorSweepChange($any($event.target).value)">
+        </label>
+
+        <label class="field">
+          <span>Mast Height (m)</span>
+          <input type="number" min="0" max="200"
+            [value]="getRadarProp('antennaMastHeight', 0)"
+            (change)="onElevationChange($any($event.target).value)">
+        </label>
+
+        <label class="checkbox-field">
           <input type="checkbox"
-            [checked]="getZoneVisible(zone)"
-            (change)="onZoneVisibilityChange(zone, $any($event.target).checked)">
-          {{ zone }}
-        </legend>
-
-        <label>
-          Range (m)
-          <input type="number" min="500"
-            [value]="getZoneRange(zone) ?? ''"
-            placeholder="default"
-            (change)="onZoneRangeChange(zone, $any($event.target).value)">
+            [checked]="getRadarProp('drawRays', false)"
+            (change)="onDrawRaysChange($any($event.target).checked)">
+          <span>Draw 3D Rays</span>
         </label>
+      </section>
 
-        <label>
-          Min elevation (deg)
-          <input type="number" step="0.5"
-            [value]="getZoneMinElevation(zone) ?? ''"
-            placeholder="default"
-            (change)="onZoneMinElevationChange(zone, $any($event.target).value)">
-        </label>
+      <section class="radar-section">
+        <h4 class="radar-section__title">Coverage Zones (Width &amp; Range)</h4>
 
-        <label>
-          Max elevation (deg)
-          <input type="number" step="0.5"
-            [value]="getZoneMaxElevation(zone) ?? ''"
-            placeholder="default"
-            (change)="onZoneMaxElevationChange(zone, $any($event.target).value)">
-        </label>
-      </fieldset>
-    }
+        @for (zone of radarZones; track zone.name) {
+          <div class="zone-card">
+            <label class="zone-card__header">
+              <input type="checkbox"
+                [checked]="getZoneVisible(zone.name)"
+                (change)="onZoneVisibilityChange(zone.name, $any($event.target).checked)">
+              <span class="zone-dot" [style.background]="zone.cssColor"></span>
+              <span class="zone-name">{{ zone.name }}</span>
+            </label>
+
+            <div class="zone-card__fields">
+              <label class="field">
+                <span>RANGE (M)</span>
+                <input type="number" min="500"
+                  [value]="getZoneRange(zone.name) ?? zoneDefaultRange(zone.name)"
+                  (change)="onZoneRangeChange(zone.name, $any($event.target).value)">
+              </label>
+
+              <label class="field">
+                <span>ANGLE WIDTH (°)</span>
+                <input type="number" step="0.5" min="0" max="90"
+                  [value]="getZoneMaxElevation(zone.name) ?? zoneDefaultMaxElevation(zone.name)"
+                  (change)="onZoneMaxElevationChange(zone.name, $any($event.target).value)">
+              </label>
+            </div>
+
+            <div class="zone-card__hint">
+              Rays from 0° to {{ getZoneMaxElevation(zone.name) ?? zoneDefaultMaxElevation(zone.name) }}° (equally divided)
+            </div>
+          </div>
+        }
+
+      </section>
+
+    </div>
   </div>
 }
 
