@@ -7,6 +7,7 @@ import { Team } from "../../core/types/Team";
 import { TeamFilter } from "../../core/models/TeamFilter";
 import { CesiumRadarCoverage, RadarCoverageHandle, RadarZoneOverride } from "./CesiumRadarCoverage";
 
+
 export class CesiumEntityRenderer {
 
     // Live radar coverage handles, keyed by source entity.id
@@ -21,6 +22,13 @@ export class CesiumEntityRenderer {
 
     // Guards against overlapping async rebuilds for the same entity
     private readonly buildInFlight = new Set<string>();
+
+    // Latest entity state that arrived while a build was already running. A
+    // rebuild takes long enough (terrain sampling per ray) that a drag can
+    // easily finish mid-build, so the newest state is parked here and built as
+    // soon as the running build finishes - otherwise the drop position would
+    // never be rendered at all.
+    private readonly pendingRebuild = new Map<string, Entity>();
 
     constructor(
         private viewer: Cesium.Viewer,
@@ -72,21 +80,31 @@ export class CesiumEntityRenderer {
         }
         this.radarEntities.delete(entityId);
         this.lastBuiltSignature.delete(entityId);
+        this.pendingRebuild.delete(entityId);
     }
 
     private buildSignature(entity: Entity): string {
         const props = (entity.definition.properties as any) ?? {};
+
         return JSON.stringify({
             lon: entity.position.longitude,
             lat: entity.position.latitude,
             alt: entity.position.altitude,
+
             sectorStartDeg: props.sectorStartDeg ?? 0,
             sectorSweepDeg: props.sectorSweepDeg ?? 360,
             antennaMastHeight: props.antennaMastHeight ?? 0,
+
             drawRays: props.drawRays ?? false,
+
             zoneVisibility: props.zoneVisibility ?? {},
             zoneRanges: props.zoneRanges ?? {},
-            zoneElevations: props.zoneElevations ?? {}
+            zoneElevations: props.zoneElevations ?? {},
+
+            azimuthStepDeg: props.azimuthStepDeg,
+            elevationRingsPerZone: props.elevationRingsPerZone,
+            rangeSampleSteps: props.rangeSampleSteps,
+            useObjectPicking: props.useObjectPicking ?? false
         });
     }
 
@@ -100,8 +118,9 @@ export class CesiumEntityRenderer {
         }
 
         if (this.buildInFlight.has(entity.id)) {
-            // A build is already running for this entity; the signature
-            // check above will pick up any further changes on the next tick.
+            // Park the newest state; the running build rebuilds from it when
+            // it finishes. Older parked states are simply overwritten.
+            this.pendingRebuild.set(entity.id, entity);
             return;
         }
 
@@ -125,6 +144,7 @@ export class CesiumEntityRenderer {
                 this.viewer,
                 this.terrainProvider,
                 {
+                    entityId: entity.id,
                     longitude: entity.position.longitude,
                     latitude: entity.position.latitude,
                     altitude: entity.position.altitude,
@@ -132,13 +152,15 @@ export class CesiumEntityRenderer {
                     sectorStartDeg: props.sectorStartDeg ?? 0,
                     sectorSweepDeg: props.sectorSweepDeg ?? 360,
                     drawRays: props.drawRays ?? false,
-                    // Multi-ring precision sampling, tuned for a reasonable rebuild
-                    // cost by default. Raise these per-radar via entity properties
-                    // if you want finer detail and can afford the extra terrain
-                    // sampling calls (cost scales as azimuths x rings x steps).
+                    // Multi-ring precision sampling. Raise these per-radar via
+                    // entity properties for finer detail (cost scales as
+                    // azimuths x rings x steps). rangeSampleSteps is left unset
+                    // on purpose: the coverage builder then derives it from each
+                    // zone's range so every zone samples at the same ground
+                    // resolution instead of coarsening as range grows.
                     azimuthStepDeg: props.azimuthStepDeg ?? 10,
                     elevationRingsPerZone: props.elevationRingsPerZone ?? 4,
-                    rangeSampleSteps: props.rangeSampleSteps ?? 20,
+                    rangeSampleSteps: props.rangeSampleSteps,
                     // Off by default: this is the expensive part (one real scene
                     // intersection query per sampled ray) and only matters if you
                     // actually have 3D Tiles/buildings loaded for radar to see.
@@ -164,6 +186,13 @@ export class CesiumEntityRenderer {
             console.error("Failed to render 3D radar coverage:", err);
         } finally {
             this.buildInFlight.delete(entity.id);
+
+            const pending = this.pendingRebuild.get(entity.id);
+
+            if (pending) {
+                this.pendingRebuild.delete(entity.id);
+                this.syncRadarCoverage(pending);
+            }
         }
     }
 

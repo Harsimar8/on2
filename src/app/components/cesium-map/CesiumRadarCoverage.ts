@@ -6,6 +6,8 @@ import { CesiumObjectDetector } from "./CesiumObjectDetector";
 // =============================================================================
 
 export interface RadarOptions {
+    entityId: string;             // source Entity.id - tagged onto every pickable piece so a
+    // click anywhere on the radar resolves back to it
     longitude: number;
     latitude: number;
     altitude?: number;
@@ -14,10 +16,10 @@ export interface RadarOptions {
     sectorSweepDeg?: number;      // 360 = full circle
     drawRays?: boolean;           // overlay the raw sampling rays (debug view)
     azimuthStepDeg?: number;      // wall vertex density (default 10deg -> 36 pts/360)
-    rangeSampleSteps?: number;    // distance samples per ray while ray-marching (default 20)
+    rangeSampleSteps?: number;    // distance samples per ray. Leave unset to derive it from
+    // the zone's range at a fixed ground spacing, which keeps
+    // every zone equally accurate; set it only to pin a count.
     elevationRingsPerZone?: number; // how many elevation rings sampled per zone (default 4, min 2)
-    debugRayStepDeg?: number;     // ray overlay azimuth stride (default 20deg)
-    debugRingCount?: number;      // ray overlay elevation rings drawn (default 3)
     useObjectPicking?: boolean;   // also test rays against loaded 3D Tiles/models (default false - this
     // is the expensive part; terrain-only is already accurate and much faster)
     zoneOverrides?: Record<string, RadarZoneOverride>;
@@ -62,8 +64,19 @@ export interface RadarCoverageHandle {
 // CesiumRadarCoverage
 // =============================================================================
 
-export class CesiumRadarCoverage {
+// Ray-march spacing along a ray, in metres. Sampling by ground distance rather
+// than by a fixed step count keeps every zone equally accurate: a fixed count
+// would sample a 20km zone four times coarser than a 5km one, which is what let
+// rays step straight over narrow ridges and carry on through the mountain.
+const TERRAIN_SAMPLE_SPACING_M = 25;
 
+// Adjacent grid points whose ranges differ by more than this ratio sit on
+// opposite sides of a terrain blockage. Joining them would stretch one triangle
+// from the blocked ray out to the unblocked one - the long blades that appear to
+// slice through the mountain - so the quad is dropped and the wall just ends.
+const MAX_NEIGHBOUR_RANGE_RATIO = 1.5;
+
+export class CesiumRadarCoverage {
     public static readonly DEFAULT_3D_ZONES: RadarZoneConfig[] = [
         {
             name: "Zone 1 (Low)",
@@ -102,17 +115,16 @@ export class CesiumRadarCoverage {
     ): Promise<RadarCoverageHandle[]> {
 
         const {
+            entityId,
             longitude,
             latitude,
             mastHeight = 0,
             sectorStartDeg = 0,
             sectorSweepDeg = 360,
             drawRays = false,
-            azimuthStepDeg = 20,
-            rangeSampleSteps = 200,
+            azimuthStepDeg = 10,
+            rangeSampleSteps,
             elevationRingsPerZone = 4,
-            debugRayStepDeg = 20,
-            debugRingCount = 3,
             useObjectPicking = false,
             zoneOverrides = {}
         } = options;
@@ -149,6 +161,10 @@ export class CesiumRadarCoverage {
                 disableDepthTestDistance: Number.POSITIVE_INFINITY
             }
         });
+        // Tag every pickable piece with the source entity id so a click/drag
+        // anywhere on the radar (marker, wall, footprint) resolves back to it -
+        // see CesiumSelection.selectEntity's radarParentId lookup.
+        (marker as any).radarParentId = entityId;
         handles.push({ dispose: () => viewer.entities.remove(marker) });
 
         // ---------------------------------------------------------------
@@ -201,6 +217,13 @@ export class CesiumRadarCoverage {
                 elevationRingsPerZone
             );
 
+            // Step count follows the zone's own range so every zone is sampled at
+            // the same ground resolution, whatever range the user dials in.
+            const rangeSteps = rangeSampleSteps ?? Math.max(
+                2,
+                Math.ceil(zone.range / TERRAIN_SAMPLE_SPACING_M)
+            );
+
             // One grid of real ray-hit points (ring x azimuth). Everything below -
             // the fill mesh, the wireframe, the ground footprint, and the optional
             // debug ray overlay - is built from this SAME grid, so they can never
@@ -213,7 +236,7 @@ export class CesiumRadarCoverage {
                 zone,
                 azimuthsDeg,
                 elevationRingsDeg,
-                rangeSampleSteps,
+                rangeSteps,
                 useObjectPicking,
                 objectsToExclude
             );
@@ -223,18 +246,19 @@ export class CesiumRadarCoverage {
                 grid.points,
                 azimuthsDeg,
                 isFullCircle,
-                radarPosition
+                radarPosition,
+                entityId
             );
             if (meshPrimitive) {
                 viewer.scene.primitives.add(meshPrimitive);
             }
 
-            const wireframePrimitive = CesiumRadarCoverage.buildWireframePrimitive(zone, grid.points, azimuthsDeg, isFullCircle);
+            const wireframePrimitive = CesiumRadarCoverage.buildWireframePrimitive(zone, grid.points, azimuthsDeg, isFullCircle, entityId, radarPosition);
             if (wireframePrimitive) {
                 viewer.scene.primitives.add(wireframePrimitive);
             }
 
-            const footprintEntity = CesiumRadarCoverage.buildGroundFootprint(viewer, zone, grid.points[0]);
+            const footprintEntity = CesiumRadarCoverage.buildGroundFootprint(viewer, zone, grid.points[0], entityId);
 
             let rayCollection: Cesium.PolylineCollection | null = null;
             if (drawRays) {
@@ -244,10 +268,7 @@ export class CesiumRadarCoverage {
                     zone,
                     grid.points,
                     azimuthsDeg,
-                    elevationRingsDeg,
-                    azimuthStepDeg,
-                    debugRayStepDeg,
-                    debugRingCount
+                    elevationRingsDeg
                 );
             }
 
@@ -286,53 +307,25 @@ export class CesiumRadarCoverage {
 
         const ringPromises = elevationRingsDeg.map(elevationDeg => {
             const rays = azimuthsDeg.map(az =>
-                CesiumRadarCoverage.makeRay(radarPosition, enuMatrix, az, elevationDeg)
+                CesiumRadarCoverage.makeRay(
+                    radarPosition,
+                    enuMatrix,
+                    az,
+                    elevationDeg
+                )
             );
 
-            if (elevationDeg === elevationRingsDeg[0]) {
-                const ray = rays[0];
 
-                console.log("========== RADAR → F16 TEST ==========");
-                console.log("Ray origin:", ray.origin);
-                console.log("Ray direction:", ray.direction);
 
-                const primitives = viewer.scene.primitives;
-
-                for (let i = 0; i < primitives.length; i++) {
-                    const primitive = primitives.get(i);
-
-                    if (!(primitive instanceof Cesium.Model)) {
-                        continue;
-                    }
-
-                    const model = primitive as Cesium.Model;
-
-                    if (!model.ready) {
-                        continue;
-                    }
-
-                    const intersection = Cesium.IntersectionTests.raySphere(
-                        ray,
-                        model.boundingSphere
-                    );
-
-                    console.log("F16 intersection:", intersection);
-
-                    if (intersection) {
-                        console.log(
-                            "✅ RADAR RAY HIT F16 at:",
-                            intersection.stop,
-                            "meters"
-                        );
-                    } else {
-                        console.log("❌ RADAR RAY DID NOT HIT F16");
-                    }
-                }
-
-                console.log("=======================================");
-            }
             return CesiumRadarCoverage.castRaysBlockDistances(
-                viewer, terrainProvider, radarPosition, rays, zone.range, rangeSteps, useObjectPicking, objectsToExclude
+                viewer,
+                terrainProvider,
+                radarPosition,
+                rays,
+                zone.range,
+                rangeSteps,
+                useObjectPicking,
+                objectsToExclude
             );
         });
 
@@ -356,7 +349,8 @@ export class CesiumRadarCoverage {
         points: Cesium.Cartesian3[][],
         azimuthsDeg: number[],
         isFullCircle: boolean,
-        radarPosition: Cesium.Cartesian3
+        radarPosition: Cesium.Cartesian3,
+        entityId: string
     ): Cesium.Primitive | null {
 
         const ringCount = points.length;
@@ -397,7 +391,9 @@ export class CesiumRadarCoverage {
                 const minDistance = Math.min(d00, d01, d10, d11);
 
                 // Do not create a stretched triangle across a terrain blockage.
-
+                if (maxDistance > minDistance * MAX_NEIGHBOUR_RANGE_RATIO) {
+                    continue;
+                }
 
                 indices.push(i00, i10, i11);
                 indices.push(i00, i11, i01);
@@ -424,6 +420,7 @@ export class CesiumRadarCoverage {
 
         const instance = new Cesium.GeometryInstance({
             geometry,
+            id: { radarParentId: entityId },
             attributes: {
                 color: Cesium.ColorGeometryInstanceAttribute.fromColor(zone.color.withAlpha(0.28))
             }
@@ -451,7 +448,9 @@ export class CesiumRadarCoverage {
         zone: ResolvedZone,
         points: Cesium.Cartesian3[][],
         azimuthsDeg: number[],
-        isFullCircle: boolean
+        isFullCircle: boolean,
+        entityId: string,
+        radarPosition: Cesium.Cartesian3
     ): Cesium.Primitive | null {
 
         const ringCount = points.length;
@@ -474,10 +473,23 @@ export class CesiumRadarCoverage {
         const indices: number[] = [];
         const azStepCount = isFullCircle ? azCount : azCount - 1;
 
+        // Same rule as the fill mesh: never draw a line across a blockage, so
+        // the wireframe ends where the rays end instead of spanning the gap.
+        const spansBlockage = (a: Cesium.Cartesian3, b: Cesium.Cartesian3) => {
+            const da = Cesium.Cartesian3.distance(radarPosition, a);
+            const db = Cesium.Cartesian3.distance(radarPosition, b);
+            return Math.max(da, db) > Math.min(da, db) * MAX_NEIGHBOUR_RANGE_RATIO;
+        };
+
         // circumferential ring lines
         for (let r = 0; r < ringCount; r++) {
             for (let a = 0; a < azStepCount; a++) {
                 const aNext = (a + 1) % azCount;
+
+                if (spansBlockage(points[r][a], points[r][aNext])) {
+                    continue;
+                }
+
                 indices.push(indexOf(r, a), indexOf(r, aNext));
             }
         }
@@ -485,6 +497,11 @@ export class CesiumRadarCoverage {
         // radial ribs (ring-to-ring, per azimuth)
         for (let a = 0; a < azCount; a++) {
             for (let r = 0; r < ringCount - 1; r++) {
+
+                if (spansBlockage(points[r][a], points[r + 1][a])) {
+                    continue;
+                }
+
                 indices.push(indexOf(r, a), indexOf(r + 1, a));
             }
         }
@@ -509,6 +526,7 @@ export class CesiumRadarCoverage {
 
         const instance = new Cesium.GeometryInstance({
             geometry,
+            id: { radarParentId: entityId },
             attributes: {
                 color: Cesium.ColorGeometryInstanceAttribute.fromColor(zone.color.withAlpha(0.85))
             }
@@ -537,7 +555,8 @@ export class CesiumRadarCoverage {
     private static buildGroundFootprint(
         viewer: Cesium.Viewer,
         zone: ResolvedZone,
-        ring0Points: Cesium.Cartesian3[]
+        ring0Points: Cesium.Cartesian3[],
+        entityId: string
     ): Cesium.Entity | null {
 
         if (!ring0Points || ring0Points.length < 3) {
@@ -550,7 +569,7 @@ export class CesiumRadarCoverage {
             return Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, c.height + 0.5);
         });
 
-        return viewer.entities.add({
+        const footprint = viewer.entities.add({
             name: `${zone.name} ground footprint`,
             polygon: {
                 hierarchy,
@@ -560,6 +579,10 @@ export class CesiumRadarCoverage {
                 outlineColor: zone.color.withAlpha(0.6)
             }
         });
+
+        (footprint as any).radarParentId = entityId;
+
+        return footprint;
     }
 
     // -------------------------------------------------------------------
@@ -574,33 +597,33 @@ export class CesiumRadarCoverage {
         zone: ResolvedZone,
         points: Cesium.Cartesian3[][],
         azimuthsDeg: number[],
-        elevationRingsDeg: number[],
-        azimuthStepDeg: number,
-        debugRayStepDeg: number,
-        debugRingCount: number
+        elevationRingsDeg: number[]
     ): Cesium.PolylineCollection {
 
         const collection = new Cesium.PolylineCollection();
 
-        const azStride = Math.max(1, Math.round(debugRayStepDeg / Math.max(1, azimuthStepDeg)));
-        const ringStride = Math.max(1, Math.round(elevationRingsDeg.length / Math.max(1, debugRingCount)));
+        for (let r = 0; r < elevationRingsDeg.length; r++) {
 
-        for (let r = 0; r < elevationRingsDeg.length; r += ringStride) {
-            for (let a = 0; a < azimuthsDeg.length; a += azStride) {
+            for (let a = 0; a < azimuthsDeg.length; a++) {
+
                 collection.add({
-                    positions: [radarPosition, points[r][a]],
+                    positions: [
+                        radarPosition,
+                        points[r][a]
+                    ],
                     width: 1,
                     material: Cesium.Material.fromType("Color", {
                         color: zone.color.withAlpha(0.55)
                     })
                 });
+
             }
         }
 
         viewer.scene.primitives.add(collection);
+
         return collection;
     }
-
     // -------------------------------------------------------------------
     // Core: batched terrain sampling + object (glTF / 3D Tiles) picking,
     // combined per ray. Terrain sampling stays the primary/authoritative
@@ -614,9 +637,8 @@ export class CesiumRadarCoverage {
     // nothing here" instead of "wall vanishes / you can see straight through".
 
 
+
     private static async castRaysBlockDistances(
-
-
         viewer: Cesium.Viewer,
         terrainProvider: Cesium.TerrainProvider,
         origin: Cesium.Cartesian3,
@@ -637,16 +659,25 @@ export class CesiumRadarCoverage {
         const samplesPerRay = steps + 1;
 
         const flatCartographics: Cesium.Cartographic[] = [];
-        const flatPoints: Cesium.Cartesian3[] = [];
         const flatDistances: number[] = [];
+
+        // The ray's own height must be captured up front: sampleTerrainMostDetailed
+        // overwrites .height on the very cartographics it is handed.
+        const flatRayHeights: number[] = [];
+
+        const scratchPoint = new Cesium.Cartesian3();
 
         for (const ray of rays) {
             for (let step = 0; step <= steps; step++) {
+
                 const distance = (maxDistance / steps) * step;
-                const point = Cesium.Ray.getPoint(ray, distance, new Cesium.Cartesian3());
-                flatPoints.push(point);
+
+                const point = Cesium.Ray.getPoint(ray, distance, scratchPoint);
+                const cartographic = Cesium.Cartographic.fromCartesian(point);
+
                 flatDistances.push(distance);
-                flatCartographics.push(Cesium.Cartographic.fromCartesian(point));
+                flatRayHeights.push(cartographic.height);
+                flatCartographics.push(cartographic);
             }
         }
 
@@ -656,105 +687,85 @@ export class CesiumRadarCoverage {
 
         for (let r = 0; r < rays.length; r++) {
 
-            let previousDistance = 0;
-            let previousBlocked = false;
+            const baseIdx = r * samplesPerRay;
+
+            // Sample 0 sits at the mast, so this starts out as the antenna's
+            // own clearance above the ground it stands on.
+            let previousDistance = flatDistances[baseIdx];
+            let previousClearance =
+                flatRayHeights[baseIdx] - (sampledTerrain[baseIdx].height ?? 0);
 
             for (let step = 1; step <= steps; step++) {
 
-                const idx = r * samplesPerRay + step;
+                const idx = baseIdx + step;
 
-                const groundHeight = sampledTerrain[idx].height ?? 0;
-                const rayHeight =
-                    Cesium.Cartographic.fromCartesian(flatPoints[idx]).height;
+                const clearance =
+                    flatRayHeights[idx] - (sampledTerrain[idx].height ?? 0);
 
-                const blocked = groundHeight >= rayHeight;
-
-                if (blocked) {
-
-                    const currentDistance = flatDistances[idx];
-
-                    // Refine the blockage location between
-                    // previousDistance and currentDistance.
-                    let low = previousDistance;
-                    let high = currentDistance;
-
-                    for (let i = 0; i < 9; i++) {
-
-                        const mid = (low + high) / 2;
-
-                        const midPoint = Cesium.Ray.getPoint(
-                            rays[r],
-                            mid,
-                            new Cesium.Cartesian3()
-                        );
-
-                        const midCartographic =
-                            Cesium.Cartographic.fromCartesian(midPoint);
-
-                        const [terrainSample] =
-                            await Cesium.sampleTerrainMostDetailed(
-                                terrainProvider,
-                                [midCartographic]
-                            );
-
-                        const midGroundHeight =
-                            terrainSample.height ?? 0;
-
-                        if (midGroundHeight >= midCartographic.height) {
-                            high = mid;
-                        } else {
-                            low = mid;
-                        }
-                    }
-
-                    terrainDistances[r] = high;
-                    break;
+                if (clearance > 0) {
+                    previousDistance = flatDistances[idx];
+                    previousClearance = clearance;
+                    continue;
                 }
 
-                previousDistance = flatDistances[idx];
-                previousBlocked = blocked;
+                // Terrain was crossed between the last clear sample and this
+                // one. Interpolating where clearance reaches zero puts the wall
+                // on the real slope instead of snapping it to the sample grid.
+                const drop = previousClearance - clearance;
+
+                const fraction = drop > 0
+                    ? Cesium.Math.clamp(previousClearance / drop, 0, 1)
+                    : 0;
+
+                terrainDistances[r] =
+                    previousDistance +
+                    fraction * (flatDistances[idx] - previousDistance);
+
+                break;
             }
         }
 
         // --- 2. Objects: check loaded GLB models using their bounding spheres ---
-const results: RayBlockResult[] = [];
+        const results: RayBlockResult[] = [];
 
-for (let r = 0; r < rays.length; r++) {
+        for (let r = 0; r < rays.length; r++) {
 
-    const detectedObjectDistance =
-        objectDetector.getFirstObjectHit(rays[r]);
+            const detectedObjectDistance =
+                objectDetector.getFirstObjectHit(rays[r]);
 
-    const objectDistance = Math.min(
-        detectedObjectDistance,
-        maxDistance
-    );
+            const objectDistance = Math.min(
+                detectedObjectDistance,
+                maxDistance
+            );
 
-    const rawDistance = Math.min(
-        terrainDistances[r],
-        objectDistance,
-        maxDistance
-    );
+            const rawDistance = Math.min(
+                terrainDistances[r],
+                objectDistance,
+                maxDistance
+            );
 
-    const blocked = rawDistance < maxDistance - 1e-6;
+            const blocked = rawDistance < maxDistance - 1e-6;
 
-    const point = Cesium.Ray.getPoint(
-        rays[r],
-        rawDistance,
-        new Cesium.Cartesian3()
-    );
 
-    results.push({
-        distance: rawDistance,
-        point,
-        blocked
-    });
-}
-            
-            // Clamp only the point used for rendering, never the "blocked" flag
-            // or the reported distance - so a genuinely-blocked ray still shows
-            // as a thin sliver of wall instead of collapsing onto the radar dot.
+            const point = Cesium.Ray.getPoint(
+                rays[r],
+                rawDistance,
+                new Cesium.Cartesian3()
+            );
 
-            
+
+            results.push({
+                distance: rawDistance,
+                point,
+                blocked
+            });
+        }
+
+        // Clamp only the point used for rendering, never the "blocked" flag
+        // or the reported distance - so a genuinely-blocked ray still shows
+        // as a thin sliver of wall instead of collapsing onto the radar dot.
+
+
 
         return results;
     }
@@ -829,4 +840,6 @@ for (let r = 0; r < rays.length; r++) {
 
         return rings;
     }
+
+
 }
