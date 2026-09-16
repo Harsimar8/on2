@@ -385,3 +385,96 @@
     padding: 8px 10px;
     margin: 0;
 }
+/* ---------------------------------------------------------------
+   GLB obstacle panel
+   --------------------------------------------------------------- */
+
+.glb-panel {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 1000;
+    width: 280px;
+    max-height: 45%;
+    overflow-y: auto;
+    padding: 12px;
+    background: #10162a;
+    color: #e5e7eb;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+}
+
+.glb-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.glb-add {
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: #2563eb;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.glb-add input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.glb-panel__empty {
+    color: #94a3b8;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.glb-card {
+    padding: 10px;
+    margin-bottom: 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.glb-card__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.glb-card__name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.glb-card__actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.glb-card .field {
+    margin-bottom: 6px;
+}
+
+.glb-card input[type="range"] {
+    width: 100%;
+}

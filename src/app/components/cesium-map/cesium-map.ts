@@ -20,6 +20,7 @@ import { EditorState } from '../../core/state/EditorState';
 import { TeamFilterService } from '../../core/services/TeamFilterService';
 import { MapSyncService } from '../../core/services/MapSync';
 import { CesiumSelection } from "./CesiumSelection";
+import { CesiumGlbManager, PlacedGlb } from "./CesiumGlbManager";
 import { BuildingLayer } from './layers/BuildingLayer';
 import { CesiumObjectDetector } from './CesiumObjectDetector';
 
@@ -146,6 +147,10 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
   private lastSelectedEntityId: string | null = null;
   protected readonly radarPanelClosed = signal(false);
 
+  private glbManager!: CesiumGlbManager;
+  protected readonly placedGlbs = signal<PlacedGlb[]>([]);
+  protected readonly glbBusy = signal(false);
+
   async ngAfterViewInit(): Promise<void> {
 
     const terrainProvider =
@@ -248,6 +253,12 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
 
       this.entityRepository
 
+    );
+
+    this.glbManager = new CesiumGlbManager(
+      this.viewer,
+      terrainProvider,
+      () => this.rebuildAllRadarCoverage()
     );
 
     // this.hover = new CesiumHover(
@@ -502,6 +513,66 @@ export class CesiumMap implements AfterViewInit, OnDestroy {
 
   closeRadarPanel(): void {
     this.radarPanelClosed.set(true);
+  }
+
+  /** Rebuilds every radar's coverage, e.g. after an obstacle moved or resized. */
+  private rebuildAllRadarCoverage(): void {
+
+    if (!this.renderer) {
+      return;
+    }
+
+    const entities = this.entityRepository.all();
+
+    for (const entity of entities) {
+      if (entity.definition.entityType === 'RadarSite') {
+        this.renderer.forceRebuild(entity.id);
+      }
+    }
+
+    this.renderer.render(entities);
+  }
+
+  async onGlbFileSelected(event: Event): Promise<void> {
+
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    this.glbBusy.set(true);
+
+    try {
+      await this.glbManager.addFromFile(file, 0, 1);
+      this.placedGlbs.set([...this.glbManager.list()]);
+    } catch (err) {
+      console.error('Failed to load GLB:', err);
+    } finally {
+      this.glbBusy.set(false);
+      // Allow re-selecting the same file.
+      input.value = '';
+    }
+  }
+
+  onGlbScaleChange(id: string, value: string): void {
+    this.glbManager.setScale(id, +value);
+    this.placedGlbs.set([...this.glbManager.list()]);
+  }
+
+  onGlbHeightChange(id: string, value: string): void {
+    this.glbManager.setHeight(id, +value);
+    this.placedGlbs.set([...this.glbManager.list()]);
+  }
+
+  removeGlb(id: string): void {
+    this.glbManager.remove(id);
+    this.placedGlbs.set([...this.glbManager.list()]);
+  }
+
+  flyToGlb(glb: PlacedGlb): void {
+    this.viewer.camera.flyToBoundingSphere(glb.model.boundingSphere, { duration: 1 });
   }
 
   updateRadarProperty(patch: Record<string, unknown>): void {

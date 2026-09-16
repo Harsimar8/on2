@@ -161,10 +161,10 @@ export class CesiumEntityRenderer {
                     azimuthStepDeg: props.azimuthStepDeg ?? 10,
                     elevationRingsPerZone: props.elevationRingsPerZone ?? 4,
                     rangeSampleSteps: props.rangeSampleSteps,
-                    // Off by default: this is the expensive part (one real scene
-                    // intersection query per sampled ray) and only matters if you
-                    // actually have 3D Tiles/buildings loaded for radar to see.
-                    useObjectPicking: props.useObjectPicking ?? false,
+                    // On by default so placed GLB objects block rays. Each ray
+                    // rejects a model on its bounding sphere first, so scenes
+                    // with no objects near the beam cost almost nothing.
+                    useObjectPicking: props.useObjectPicking ?? true,
                     zoneOverrides
                 }
             );
