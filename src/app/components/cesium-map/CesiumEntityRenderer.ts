@@ -158,8 +158,8 @@ export class CesiumEntityRenderer {
                     // on purpose: the coverage builder then derives it from each
                     // zone's range so every zone samples at the same ground
                     // resolution instead of coarsening as range grows.
-                    azimuthStepDeg: props.azimuthStepDeg ?? 10,
-                    elevationRingsPerZone: props.elevationRingsPerZone ?? 4,
+                    azimuthStepDeg: props.azimuthStepDeg ?? 0.50,
+                    elevationRingsPerZone: props.elevationRingsPerZone ?? 20,
                     rangeSampleSteps: props.rangeSampleSteps,
                     // On by default so placed GLB objects block rays. Each ray
                     // rejects a model on its bounding sphere first, so scenes

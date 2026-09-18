@@ -127,7 +127,7 @@ export class CesiumRadarCoverage {
             sectorStartDeg = 0,
             sectorSweepDeg = 360,
             drawRays = false,
-            azimuthStepDeg = 10,
+            azimuthStepDeg = 100,
             rangeSampleSteps,
             elevationRingsPerZone = 4,
             useObjectPicking = false,
